@@ -18,7 +18,9 @@
 | Discussion | One chat per video, selected point is the "focus" | The AI remembers the whole conversation; focus keeps answers on topic |
 | Web search | Model decides when to use Google Search | "Explain simpler" needs no search; "is this true?" does |
 | Persistence | Local history only | Reopening a video is instant and free |
-| Language | Output always English | Source transcript stays in the original language |
+| Language | English videos only (for now), English output | English captions are the best quality, and it removes a whole class of edge cases |
+| Playback sync | None: the panel does not follow the video | Timestamps are click-to-seek only; no polling of playback time |
+| Observability | Local structured log + Sentry + one-click "Report issue" | You report with one click; Claude debugs from the Sentry event (§8) |
 | Models | Selectable per task in settings | Model names change every few months, so they're not hardcoded |
 | Chapters | Used as a *hint*, not as structure | Chapters are topic labels ("Childhood"), points are insights |
 | Stack | TypeScript + React, WXT framework | Owner is a mobile dev, OK with TS + React |
@@ -78,7 +80,7 @@ Manifest V3. Four pieces, each with one job:
 │    (title, duration, caption tracks,       (YouTube is an SPA:           │
 │     chapters)                               'yt-navigate-finish')        │
 │  • fetches transcript using the page's   • seek: video.currentTime = t   │
-│    own cookies/context (see §4)          • reports current playback time │
+│    own cookies/context (see §4)          • forwards logs/errors (§8)     │
 │            ▲   window.postMessage   ▼                                    │
 └────────────┼─────────────────────────────┼───────────────────────────────┘
              │                             │ chrome.runtime messaging
@@ -100,7 +102,7 @@ Manifest V3. Four pieces, each with one job:
 
 ### Permissions (minimal)
 - `sidePanel`, `storage`, `unlimitedStorage` (history of 3h transcripts adds up)
-- `host_permissions`: `https://www.youtube.com/*`, `https://generativelanguage.googleapis.com/*`
+- `host_permissions`: `https://www.youtube.com/*`, `https://generativelanguage.googleapis.com/*`, the Sentry ingest host of your org's region (e.g. `https://*.ingest.sentry.io/*` or `https://*.ingest.de.sentry.io/*`)
 
 ## 4. Transcript acquisition — the riskiest part
 
@@ -127,7 +129,7 @@ interface Transcript {
 }
 ```
 
-**Track choice:** prefer manual captions in the video's original language, then ASR in the original language. Never YouTube's auto-*translated* track. Gemini translates better, and we output English anyway.
+**Track choice:** English only for now. Prefer manual English captions, then English ASR. Never use an auto-*translated* track. If a video has no English track, show "Only English videos are supported for now" instead of guessing. Keeping `language` in the data model makes adding other languages later a small change.
 
 **Milestone 0 exists to find out which of strategies 1–3 actually work today.** Don't write UI before this is proven.
 
@@ -213,14 +215,58 @@ Realistic personal use (5 videos/day, a few chats) costs **a few dollars a month
   ```
 - History view: a list sorted by `lastOpenedAt` with a search box over titles. Clicking an entry opens the video and the stored summary.
 
-## 8. Project layout
+## 8. Observability: logging, errors, issue reports
+
+**Goal:** when something looks wrong, you click one button and write one sentence. Claude can then open the report in Sentry and see exactly what happened: which transcript strategy failed and why, what prompt was sent, what the model returned, and how much it cost. You never write a bug report like "the summary was weird".
+
+### 8.1 Three layers
+
+| Layer | When | What | Where |
+|---|---|---|---|
+| **Local event log** | Always, automatic | Structured events from every component (table below), as a ring buffer of the last ~1,000 events | IndexedDB (no network, free) |
+| **Sentry errors** | Automatic, on failure | Exceptions with tags and the recent log events as breadcrumbs. **Metadata only**: no transcripts, prompts or responses | Sentry |
+| **"Report issue"** | Manual (⚑ in the panel header and on every error card) | Your one-line description as Sentry *User Feedback*, plus an attached `debug-bundle.json` with **everything**: the log for this video, the transcript, every prompt and raw response, the rendered summary, settings (key stripped), and extension and Chrome versions | Sentry (attachment) |
+
+Why split it like this: automatic error events stay small and private, while the manual report carries the full content you'd need to answer questions like "why did it miss the main point?". Those are quality problems, and no exception is ever thrown for them.
+
+**Fallback without Sentry:** a **"Copy debug bundle"** button puts the same JSON on the clipboard, so you can paste it into a chat or save it as a file. This works with no network access at all, and it's also how a cloud Claude session can debug when it can't reach Sentry.
+
+### 8.2 Events worth logging
+
+| Event | Data | Answers the question… |
+|---|---|---|
+| `transcript.attempt` | strategy, outcome (`ok` / `empty_200` / `http_4xx` / `no_english_track` / `dom_timeout`), ms, segment count | "Which fallback broke this time?" |
+| `transcript.selected` | source, `manual`/`asr`, segments, words | "Was the summary bad because the captions were auto-generated garbage?" |
+| `llm.request` | task, model, promptVersion, est. input tokens, grounded? | "Which model/prompt produced this?" |
+| `llm.response` | ms, finishReason, input/output/cached tokens, search query count, est. cost | "Why was it slow / expensive / cut off?" |
+| `llm.invalid_output` | task, validation error, retry # | "Is the model breaking the JSON schema?" |
+| `summary.validated` | point count, timestamps snapped / hidden | "Why does point 3 jump to the wrong place?" |
+| `ui.action` | summarize / expand / seek / chat / report, with ids | "What did you click before it broke?" |
+
+A free side effect: `llm.response` token counts multiplied by a small price table give a **cost per video** in the panel ("this video: $0.04").
+
+### 8.3 Sentry setup — extension-specific gotchas
+- **No Sentry inside the YouTube page.** The content script and the MAIN-world script run in YouTube's page, and YouTube has its own error tracking. If both are hooked into the same page, each captures the other's errors. These scripts only send log events and errors to the extension over messaging.
+- **Don't call `Sentry.init()`.** Sentry's guidance for browser extensions is to create a `BrowserClient` + `Scope` manually, without global integrations. Use one small `telemetry` module in the side panel and the background worker.
+- **The Gemini API key must never leak into telemetry.** Send it as the `x-goog-api-key` header, never the `?key=` URL parameter, so it can't appear in URL breadcrumbs. `beforeSend`/`beforeBreadcrumb` also scrub anything matching Google's key pattern (`AIza…`), and the debug-bundle builder drops `settings.apiKey` explicitly.
+- **Readable stack traces without plumbing:** build **unminified**. Bundle size doesn't matter for a personal, unpacked extension, so there's no need for a source-map upload pipeline. Add `@sentry/vite-plugin` only if minification is ever turned on.
+- **Tags on every event:** `release = smrzr@<version>+<git sha>`, `environment` (development/production), `videoId`, `task`, `model`, `transcriptSource`, `promptVersion`.
+- **Tracing:** spans around transcript fetching and each LLM call, at 100% sampling. Personal volume is tiny, and it shows latency per model and strategy for free.
+- **Config:** `WXT_SENTRY_DSN` in `.env.local`, not committed. If the DSN is missing, Sentry is off, and the local log and "Copy debug bundle" still work.
+
+### 8.4 How debugging works in practice
+1. Point 4 jumps to the wrong minute → you click ⚑, write "point 4 timestamp is 10 min off", and send.
+2. You tell Claude: "check the latest smrzr feedback".
+3. Claude reads the feedback and its `debug-bundle.json` through the Sentry MCP/CLI and sees, for example, `summary.validated: snapped=1` and a transcript from `asr`. It looks up which segment the model cited, fixes the prompt or the snapping logic, and adds the bundle as a test fixture.
+
+## 9. Project layout
 
 ```
 smrzr/
 ├── wxt.config.ts               # manifest generated here
 ├── entrypoints/
 │   ├── background.ts           # side panel wiring
-│   ├── youtube.content.ts      # isolated world: navigation, seek, playback time
+│   ├── youtube.content.ts      # isolated world: navigation, seek, log forwarding
 │   ├── youtube-main.content.ts # MAIN world: player response, transcript fetch
 │   └── sidepanel/              # React app
 │       ├── App.tsx
@@ -231,30 +277,31 @@ smrzr/
 │   ├── llm/                    # LlmClient interface + Gemini impl
 │   ├── prompts/                # versioned prompt templates
 │   ├── storage/                # Dexie db + settings
+│   ├── telemetry/              # event log, Sentry client, debug bundle (§8)
 │   └── messaging.ts            # typed messages between page ⇄ panel
 └── tests/
 ```
 
-**Testing:** unit tests for transcript compaction, timestamp validation and JSON parsing, using **recorded fixtures** (real caption payloads saved to disk). A manual "golden set" of videos to re-check after YouTube changes: a long podcast, a slide lecture, a news commentary, a video with no captions, a Czech video, a Short, a live/premiere, an age-restricted one.
+**Testing:** unit tests for transcript compaction, timestamp validation and JSON parsing, using **recorded fixtures** (real caption payloads saved to disk). A manual "golden set" of videos to re-check after YouTube changes: a long podcast, a slide lecture, a news commentary, a video with no captions, a non-English video (must show the "English only" message), a Short, a live/premiere, an age-restricted one.
 
-## 9. Milestones
+## 10. Milestones
 
 | M | Scope | Done when |
 |---|---|---|
-| **M0 — Spike** (1–2 evenings) | WXT skeleton, MAIN-world script, try transcript strategies 1–3, one raw Gemini call with the key hardcoded in dev | Transcripts are reliably extracted for the golden set, and you know which strategy wins |
-| **M1 — Summary** | Side panel, settings (key + model lists), Summarize → up to 7 points, streaming render | You use it daily instead of 2× speed |
-| **M2 — Details + seek** | Lazy expand, sub-points, context block, timestamp → seek, highlight the point currently playing | Clicking around a 3h podcast feels like a table of contents |
+| **M0 — Spike** (1–2 evenings) | WXT skeleton, MAIN-world script, try transcript strategies 1–3, one raw Gemini call with the key hardcoded in dev, **local event log + Sentry + "Copy debug bundle"** | Transcripts are reliably extracted for the golden set, you know which strategy wins, and a failed attempt shows up in Sentry with its reason |
+| **M1 — Summary** | Side panel, settings (key + model lists), Summarize → up to 7 points, streaming render, ⚑ "Report issue" with debug bundle | You use it daily instead of 2× speed |
+| **M2 — Details + seek** | Lazy expand, sub-points, context block, timestamp → seek | Clicking around a 3h podcast feels like a table of contents |
 | **M3 — Chat** | One thread per video, focus chip, quick actions, grounding + citations + search suggestions | A fact-check returns real, clickable sources with verdicts |
 | **M4 — History** | Dexie persistence, history view, `promptVersion` invalidation | Reopening a video is instant and free |
 | **M5 — Visuals** | Per-point clip analysis with the video URL | A slide-heavy lecture point gets "what's on the slide" |
 | Later | Web articles (Readability), Markdown export, Firefox, other providers | — |
 
-## 10. Risks & open questions
+## 11. Risks & open questions
 
 1. **Transcript extraction breaks** (high likelihood, every few months). Mitigation: strategy chain, one isolated module, fixtures, golden set.
 2. **Timestamp hallucination.** Mitigation: snap and validate in code (§5.2).
 3. **Grounded answers still cite weak sources.** Mitigation: a prompt preference for primary sources, plus a visible source list so you can judge.
 4. **Structured output + Search in one call:** unclear whether the current API allows a response schema together with `google_search`. Chat is free text anyway, so this only matters if fact-checks should become structured cards. Check in M3.
 5. **Gemini API churn** (generateContent vs. Interactions API). Mitigation: the `LlmClient` interface.
-6. **Open:** should the panel follow along while the video plays (auto-highlight the current point)? Planned for M2, cheap to build.
+6. **Debug bundles contain full transcripts and prompts.** That's fine for a personal Sentry project. If the extension is ever shared, make the attachment opt-in per report.
 7. **Open:** live streams and Premieres have no final transcript. For now the extension shows "not supported" for them.
