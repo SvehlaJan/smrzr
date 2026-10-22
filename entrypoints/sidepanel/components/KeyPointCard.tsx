@@ -121,9 +121,12 @@ function PointBody({ point, details, status, onExpand, onLookAtVisuals, onOpenSe
               onOpenSettings={visualsOp.error.settings ? onOpenSettings : undefined}
             />
           )}
-          <button type="button" className="btn btn-small" onClick={() => onLookAtVisuals(point.id)}>
-            👁 Look at the visuals for this part
-          </button>
+          {/* Without a verified start time there is no clip to send, so no button. */}
+          {point.startSec !== null && (
+            <button type="button" className="btn btn-small" onClick={() => onLookAtVisuals(point.id)}>
+              👁 Look at the visuals for this part
+            </button>
+          )}
         </>
       )}
     </>

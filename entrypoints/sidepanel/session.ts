@@ -67,6 +67,8 @@ export function metaFromRecord(record: VideoRecord): VideoMeta {
 
 export function transcriptFailureMessage(failure: TranscriptFailure): string {
   switch (failure.error) {
+    case 'no_captions':
+      return "This video has no captions, so smrzr can't summarize it yet.";
     case 'no_english_track':
       return 'Only English videos are supported for now.';
     case 'live':
@@ -222,10 +224,8 @@ export async function runSummarize(
 ): Promise<SummarizeOutcome> {
   a.onStep?.('transcript');
   const tr = await requestTranscript(a.tabId, a.meta.videoId);
-  if (!tr.ok) {
-    a.logger.event('transcript.failed', { error: tr.error, attempts: tr.attempts.length }, { level: 'warn', videoId: a.meta.videoId });
-    return { ok: false, failure: tr };
-  }
+  // `transcript.failed` (with every attempt) is already logged by the content script.
+  if (!tr.ok) return { ok: false, failure: tr };
   a.logger.setTags({ videoId: a.meta.videoId, transcriptSource: tr.transcript.source, promptVersion: PROMPT_VERSION });
 
   a.onStep?.('summary');

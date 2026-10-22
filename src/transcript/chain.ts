@@ -86,13 +86,15 @@ export async function runTranscriptChain(opts: ChainOptions): Promise<Transcript
   // (TranscriptAttempt requires a strategy name; we use 'player', the first strategy, for this step.)
   const track = selectEnglishTrack(meta.captionTracks);
   if (!track) {
+    const noCaptions = meta.captionTracks.length === 0;
     attempts.push({
       strategy: 'player',
-      outcome: meta.captionTracks.length === 0 ? 'no_tracks' : 'no_english_track',
+      outcome: noCaptions ? 'no_tracks' : 'no_english_track',
       ms: 0,
       detail: `tracks: ${describeTracks(meta.captionTracks)}`,
     });
-    return { ok: false, error: 'no_english_track', attempts };
+    // "No captions at all" and "captions, but not in English" get different messages in the UI.
+    return { ok: false, error: noCaptions ? 'no_captions' : 'no_english_track', attempts };
   }
 
   const ctx: StrategyContext = { videoId: meta.videoId, track };

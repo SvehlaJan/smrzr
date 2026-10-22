@@ -25,7 +25,10 @@ export type VideoContextResponse =
 
 export type TranscriptResponse =
   | { ok: true; transcript: Transcript; attempts: TranscriptAttempt[] }
-  | { ok: false; error: 'no_english_track' | 'live' | 'all_strategies_failed'; attempts: TranscriptAttempt[] };
+  | { ok: false; error: TranscriptError; attempts: TranscriptAttempt[] };
+
+/** `no_captions` = the video has no caption tracks at all; `no_english_track` = tracks exist, none in English. */
+export type TranscriptError = 'no_captions' | 'no_english_track' | 'live' | 'all_strategies_failed';
 
 export type SeekResponse = { ok: boolean };
 

@@ -68,7 +68,7 @@ describe('formatRelativeDate', () => {
 describe('YouTube URL parsing', () => {
   it('extracts ids from watch URLs only', () => {
     expect(parseVideoId('https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s')).toBe('dQw4w9WgXcQ');
-    expect(parseVideoId('https://m.youtube.com/watch?v=dQw4w9WgXcQ')).toBe('dQw4w9WgXcQ');
+    expect(parseVideoId('https://youtube.com/watch?v=dQw4w9WgXcQ')).toBe('dQw4w9WgXcQ');
     expect(parseVideoId('https://www.youtube.com/feed/subscriptions')).toBeNull();
     expect(parseVideoId('https://www.youtube.com/watch?v=short')).toBeNull();
     expect(parseVideoId('https://evil.example/watch?v=dQw4w9WgXcQ')).toBeNull();
@@ -78,6 +78,12 @@ describe('YouTube URL parsing', () => {
   it('recognises YouTube hosts', () => {
     expect(isYouTubeUrl('https://www.youtube.com/')).toBe(true);
     expect(isYouTubeUrl('chrome://newtab')).toBe(false);
+  });
+  it('treats mobile and music YouTube as "not a video page" (content scripts only run on www)', () => {
+    expect(parseVideoId('https://m.youtube.com/watch?v=dQw4w9WgXcQ')).toBeNull();
+    expect(parseVideoId('https://music.youtube.com/watch?v=dQw4w9WgXcQ')).toBeNull();
+    expect(isYouTubeUrl('https://m.youtube.com/')).toBe(false);
+    expect(isYouTubeUrl('https://music.youtube.com/')).toBe(false);
   });
 });
 

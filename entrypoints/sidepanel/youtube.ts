@@ -4,11 +4,17 @@
 /** YouTube video ids are 11 chars of [A-Za-z0-9_-]. */
 const VIDEO_ID = /^[A-Za-z0-9_-]{11}$/;
 
+/**
+ * Only the desktop site: our content scripts match `https://www.youtube.com/*` only, so on
+ * m.youtube.com / music.youtube.com nothing would answer the panel. (Bare youtube.com
+ * redirects to www.)
+ */
+const SUPPORTED_HOSTS = new Set(['www.youtube.com', 'youtube.com']);
+
 export function isYouTubeUrl(url: string | null | undefined): boolean {
   if (!url) return false;
   try {
-    const host = new URL(url).hostname;
-    return host === 'youtube.com' || host.endsWith('.youtube.com');
+    return SUPPORTED_HOSTS.has(new URL(url).hostname);
   } catch {
     return false;
   }

@@ -59,6 +59,36 @@ describe('KeyPointCard', () => {
     expect(screen.queryByRole('button', { name: /Jump to/ })).toBeNull();
   });
 
+  it('offers "Look at the visuals" only for points with a verified start time', () => {
+    const renderWithDetails = (pointIndex: number) =>
+      render(
+        <PanelProvider tabId={TAB_ID} videoId={VIDEO_ID} onOpenReport={() => {}}>
+          <ol>
+            <KeyPointCard
+              point={SUMMARY.points[pointIndex]!}
+              number={pointIndex + 1}
+              details={DETAILS}
+              isFocus={false}
+              onExpand={() => {}}
+              onLookAtVisuals={() => {}}
+              onDiscuss={() => {}}
+              onOpenSettings={() => {}}
+            />
+          </ol>
+        </PanelProvider>,
+      );
+
+    renderWithDetails(1); // p2: startSec === null
+    fireEvent.click(screen.getByRole('button', { name: /Delay caffeine/ }));
+    expect(screen.getByText('ⓘ Context (not from the video)')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Look at the visuals/ })).toBeNull();
+    cleanup();
+
+    renderWithDetails(0); // p1: has a start time
+    fireEvent.click(screen.getByRole('button', { name: /Weekend catch-up sleep/ }));
+    expect(screen.getByRole('button', { name: /Look at the visuals/ })).toBeTruthy();
+  });
+
   it('calls onExpand when opened, not when closed', () => {
     const { onExpand } = renderCard(0);
     const toggle = screen.getByRole('button', { name: /Weekend catch-up sleep/ });

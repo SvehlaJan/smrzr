@@ -76,10 +76,15 @@ describe('runSummarize', () => {
     expect(out).toEqual({ ok: false, failure: { ok: false, error: 'all_strategies_failed', attempts: ATTEMPTS } });
     expect(pipelineMock.summarize).not.toHaveBeenCalled();
     expect(dbMock.putVideo).not.toHaveBeenCalled();
+    // The content script already logged transcript.failed with the attempts; no duplicate here.
+    expect(loggerMock.event.mock.calls.some(([name]) => name === 'transcript.failed')).toBe(false);
   });
 
   it('maps transcript errors to messages', () => {
     expect(transcriptFailureMessage({ ok: false, error: 'no_english_track', attempts: [] })).toBe('Only English videos are supported for now.');
+    expect(transcriptFailureMessage({ ok: false, error: 'no_captions', attempts: [] })).toBe(
+      "This video has no captions, so smrzr can't summarize it yet.",
+    );
     expect(transcriptFailureMessage({ ok: false, error: 'live', attempts: [] })).toMatch(/Live streams/);
     expect(transcriptFailureMessage({ ok: false, error: 'all_strategies_failed', attempts: [] })).toBe("Couldn't get the transcript.");
   });

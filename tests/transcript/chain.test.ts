@@ -114,9 +114,11 @@ describe('runTranscriptChain', () => {
     expect(player.run).not.toHaveBeenCalled();
   });
 
-  it('distinguishes "no tracks at all" in the attempt outcome', async () => {
-    const res = await runTranscriptChain({ meta: meta({ captionTracks: [] }), strategies: [] });
-    expect(res).toMatchObject({ ok: false, error: 'no_english_track', attempts: [{ outcome: 'no_tracks' }] });
+  it('reports no_captions (not no_english_track) when the video has no caption tracks at all', async () => {
+    const player = strategy('player', { ok: true, segments: SEGS });
+    const res = await runTranscriptChain({ meta: meta({ captionTracks: [] }), strategies: [player] });
+    expect(res).toMatchObject({ ok: false, error: 'no_captions', attempts: [{ outcome: 'no_tracks' }] });
+    expect(player.run).not.toHaveBeenCalled();
   });
 
   it('refuses live streams without trying anything', async () => {
