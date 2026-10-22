@@ -3,6 +3,7 @@
 
 import { useCallback, useState } from 'react';
 import { browser } from 'wxt/browser';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { ErrorCard } from './components/ErrorCard';
 import { Header, type View } from './components/Header';
 import { PanelProvider } from './components/PanelContext';
@@ -20,7 +21,7 @@ export function App() {
   const { settings, error: settingsError, setSettings } = useSettings();
   useTelemetry(settings?.sentryEnabled);
   const active = useActiveVideo();
-  const session = useVideoSession(active.tabId, active.videoId, settings);
+  const session = useVideoSession(active.tabId, active.videoId, settings, active.tabSignals);
 
   const [view, setView] = useState<View>('video');
   const [reportOpen, setReportOpen] = useState(false);
@@ -81,7 +82,10 @@ export function App() {
           onHistory={() => toggleView('history')}
           onSettings={() => toggleView('settings')}
         />
-        <main className="content">{body}</main>
+        <main className="content">
+          {/* A render error in a view shows an error card instead of an empty panel. */}
+          <ErrorBoundary resetKey={`${view}:${active.videoId ?? ''}`}>{body}</ErrorBoundary>
+        </main>
       </div>
       {reportOpen && <ReportDialog videoId={active.videoId} onClose={closeReport} />}
     </PanelProvider>

@@ -2,11 +2,13 @@
 // and persisting results. `hooks/useVideoSession.ts` wires these into React state; keeping
 // them here makes them unit-testable with plain mocks (no rendering needed).
 
-import { requestTranscript, requestVideoContext, type TranscriptResponse, type VideoContextResponse } from '@/src/messaging';
+import { browser } from 'wxt/browser';
+import { isTranscriptResponse, isVideoContextResponse } from '@/src/messageGuards';
+import { requestTranscript, requestVideoContext, type TranscriptResponse } from '@/src/messaging';
 import { createGeminiClient } from '@/src/llm/gemini';
 import { analyzeVisuals, expandPoint, PROMPT_VERSION, sendChat, summarize, type PipelineContext } from '@/src/pipeline';
 import type { Logger } from '@/src/telemetry';
-import { getVideo, putVideo, updateVideo } from '@/src/storage/db';
+import { putVideo, updateVideoWith, type VideoPatch } from '@/src/storage/db';
 import type { LlmTask, LlmUsage, Settings, Transcript, VideoMeta, VideoRecord } from '@/src/types';
 import { isNoReceiverError, type UiError } from './errors';
 
@@ -52,8 +54,12 @@ export function setupProblem(settings: Settings | null, task: LlmTask): string |
   return null;
 }
 
-/** When a stored summary is shown but the tab can't be asked for metadata, the record has enough. */
+/**
+ * When a stored summary is shown but the tab can't be asked for metadata, the record has enough:
+ * the VideoMeta stored at summarize time, or (older records) one rebuilt from the header fields.
+ */
 export function metaFromRecord(record: VideoRecord): VideoMeta {
+  if (record.meta) return record.meta;
   return {
     videoId: record.videoId,
     title: record.title,
@@ -92,6 +98,7 @@ export function buildVideoRecord(args: {
     title: meta.title,
     channel: meta.channel,
     durationSec: meta.durationSec,
+    meta,
     transcript,
     summary,
     // A new summary has new point ids, so old details/chat would point at the wrong things.
@@ -121,42 +128,82 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** True while Chrome is still loading the tab's page. Errors (tab closed…) count as "not loading". */
+async function isTabLoading(tabId: number): Promise<boolean> {
+  try {
+    return (await browser.tabs.get(tabId)).status === 'loading';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Asks the content script for the video's metadata. YouTube is a single-page app: right after
  * a navigation the player may still describe the previous video or not be ready, so we retry
- * a few times with a growing delay. Never throws.
+ * a few times with a growing delay.
+ *
+ * After a full page load the panel asks as soon as the URL changes, but our content script is
+ * only injected once the page is idle (`document_idle`). So while the tab is still loading, a
+ * missing content script is expected: we keep polling (up to `loadingWaitMs`) before reporting
+ * `no_content_script` ("reload the tab"). Never throws.
  */
 export async function fetchVideoContext(
   tabId: number,
   videoId: string,
-  opts: { signal?: AbortSignal; attempts?: number; delayMs?: number } = {},
+  opts: {
+    signal?: AbortSignal;
+    attempts?: number;
+    delayMs?: number;
+    /** Longest total wait for a content script while the tab is loading. */
+    loadingWaitMs?: number;
+    /** Delay between those extra polls. */
+    loadingPollMs?: number;
+    /** Injectable for tests; defaults to asking chrome.tabs. */
+    isTabLoading?: (tabId: number) => Promise<boolean>;
+  } = {},
 ): Promise<ContextResult> {
   const attempts = opts.attempts ?? 4;
   const delayMs = opts.delayMs ?? 500;
+  const loadingWaitMs = opts.loadingWaitMs ?? 15_000;
+  const loadingPollMs = opts.loadingPollMs ?? 1_000;
+  const tabIsLoading = opts.isTabLoading ?? isTabLoading;
+  const started = Date.now();
   let last: ContextResult = { ok: false, error: 'player_not_ready' };
 
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await sleep(delayMs * i, opts.signal);
+  for (let i = 0; ; i++) {
+    if (i > 0) await sleep(i < attempts ? delayMs * i : loadingPollMs, opts.signal);
     if (opts.signal?.aborted) return { ok: false, error: 'error', detail: 'aborted' };
-    let res: VideoContextResponse;
-    try {
-      res = await requestVideoContext(tabId);
-    } catch (err) {
-      // No content script listening. Retry: it may be injecting right now after a page load.
-      last = isNoReceiverError(err)
-        ? { ok: false, error: 'no_content_script' }
-        : { ok: false, error: 'error', detail: err instanceof Error ? err.message : String(err) };
-      continue;
-    }
-    if (res.ok && res.meta.videoId === videoId) return res;
-    if (res.ok) {
-      last = { ok: false, error: 'player_not_ready', detail: 'player still shows the previous video' };
-      continue;
-    }
-    last = res;
-    if (res.error === 'error') return res; // a real failure; retrying won't help
+
+    const answer = await askTabOnce(tabId, videoId);
+    if (answer.final) return answer.result;
+    last = answer.result;
+
+    if (i + 1 < attempts) continue; // normal retries
+    // Out of normal retries. Only a missing content script in a still-loading tab is worth more waiting.
+    const waitForInjection =
+      !last.ok && last.error === 'no_content_script' && Date.now() - started < loadingWaitMs && (await tabIsLoading(tabId));
+    if (!waitForInjection) return last;
   }
-  return last;
+}
+
+/** One request to the tab. `final` = return this result right away (success or a real failure). */
+async function askTabOnce(tabId: number, videoId: string): Promise<{ result: ContextResult; final: boolean }> {
+  let res: unknown;
+  try {
+    res = await requestVideoContext(tabId);
+  } catch (err) {
+    // No content script listening. Retry: it may be injecting right now after a page load.
+    return isNoReceiverError(err)
+      ? { result: { ok: false, error: 'no_content_script' }, final: false }
+      : { result: { ok: false, error: 'error', detail: err instanceof Error ? err.message : String(err) }, final: false };
+  }
+  // The answer partly comes from the page, which can forge it: check the shape before using it.
+  if (!isVideoContextResponse(res)) {
+    return { result: { ok: false, error: 'error', detail: 'unexpected answer from the YouTube tab' }, final: false };
+  }
+  if (res.ok && res.meta.videoId === videoId) return { result: res, final: true };
+  if (res.ok) return { result: { ok: false, error: 'player_not_ready', detail: 'player still shows the previous video' }, final: false };
+  return { result: res, final: res.error === 'error' }; // 'error' is a real failure; retrying won't help
 }
 
 /** Decides the first screen for a video once we know the stored record and the tab's answer. */
@@ -189,6 +236,15 @@ interface RunBase {
   signal?: AbortSignal;
 }
 
+/**
+ * Meta for prompts about an already summarized video. The stored summarize-time meta wins over the
+ * tab's current one (e.g. chapters that loaded later), so every later prompt starts with exactly
+ * the same prefix as the summary did. Old records without it use `current`.
+ */
+function promptMeta(record: VideoRecord, current: VideoMeta): VideoMeta {
+  return record.meta ?? current;
+}
+
 function pipelineContext(a: RunBase & { meta: VideoMeta; transcript: Transcript }): PipelineContext {
   return {
     client: createGeminiClient(a.settings.apiKey),
@@ -200,15 +256,12 @@ function pipelineContext(a: RunBase & { meta: VideoMeta; transcript: Transcript 
 }
 
 /**
- * Read-modify-write with the freshest stored copy, so two operations finishing close together
- * (e.g. expanding a point while a chat reply lands) don't overwrite each other's results.
+ * Read-modify-write with the freshest stored copy, inside one database transaction, so two
+ * operations finishing close together (e.g. expanding a point while a chat reply lands) don't
+ * overwrite each other's results.
  */
-async function patchRecord(
-  fallback: VideoRecord,
-  makePatch: (latest: VideoRecord) => Partial<Omit<VideoRecord, 'videoId'>>,
-): Promise<VideoRecord> {
-  const latest = (await getVideo(fallback.videoId)) ?? fallback;
-  return updateVideo(fallback.videoId, makePatch(latest));
+function patchRecord(record: VideoRecord, makePatch: (latest: VideoRecord) => VideoPatch): Promise<VideoRecord> {
+  return updateVideoWith(record.videoId, makePatch);
 }
 
 export type SummarizeOutcome = { ok: true; record: VideoRecord } | { ok: false; failure: TranscriptFailure };
@@ -223,9 +276,16 @@ export async function runSummarize(
   },
 ): Promise<SummarizeOutcome> {
   a.onStep?.('transcript');
-  const tr = await requestTranscript(a.tabId, a.meta.videoId);
+  const tr: unknown = await requestTranscript(a.tabId, a.meta.videoId);
+  // The answer partly comes from the page, which can forge it: check the shape before using it.
+  if (!isTranscriptResponse(tr)) {
+    const attempt = { strategy: 'player', outcome: 'error', ms: 0, detail: 'unexpected answer from the YouTube tab' } as const;
+    return { ok: false, failure: { ok: false, error: 'all_strategies_failed', attempts: [attempt] } };
+  }
   // `transcript.failed` (with every attempt) is already logged by the content script.
   if (!tr.ok) return { ok: false, failure: tr };
+  // Cancelled while the transcript was loading: stop before anything is paid for or saved.
+  a.signal?.throwIfAborted();
   a.logger.setTags({ videoId: a.meta.videoId, transcriptSource: tr.transcript.source, promptVersion: PROMPT_VERSION });
 
   a.onStep?.('summary');
@@ -251,7 +311,7 @@ export async function runExpand(
   const summary = a.record.summary;
   if (!summary) throw new Error('There is no summary to expand.');
 
-  const ctx = pipelineContext({ ...a, transcript: a.record.transcript });
+  const ctx = pipelineContext({ ...a, meta: promptMeta(a.record, a.meta), transcript: a.record.transcript });
   const { details, usage } = await expandPoint(ctx, a.settings.models.details, summary, a.pointId);
   const record = await patchRecord(a.record, (latest) => ({
     details: { ...latest.details, [a.pointId]: { ...details, visuals: latest.details[a.pointId]?.visuals } },
@@ -267,7 +327,7 @@ export async function runVisuals(
   const point = a.record.summary?.points.find((p) => p.id === a.pointId);
   if (!point) throw new Error(`Unknown point ${a.pointId}.`);
 
-  const ctx = pipelineContext({ ...a, transcript: a.record.transcript });
+  const ctx = pipelineContext({ ...a, meta: promptMeta(a.record, a.meta), transcript: a.record.transcript });
   const { text, usage } = await analyzeVisuals(ctx, a.settings.models.visuals, point);
   return patchRecord(a.record, (latest) => {
     const current = latest.details[a.pointId] ?? { subpoints: [], context: '' };
@@ -291,7 +351,7 @@ export async function runChat(
   const summary = a.record.summary;
   if (!summary) throw new Error('Summarize the video before chatting about it.');
 
-  const ctx = pipelineContext({ ...a, transcript: a.record.transcript });
+  const ctx = pipelineContext({ ...a, meta: promptMeta(a.record, a.meta), transcript: a.record.transcript });
   const { userMessage, reply } = await sendChat(ctx, a.settings.models.chat, {
     summary,
     history: a.record.chat,

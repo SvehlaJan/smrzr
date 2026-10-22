@@ -137,6 +137,12 @@ export interface VideoRecord {
   title: string;
   channel: string;
   durationSec: number;
+  /**
+   * The exact VideoMeta the summary was made with. Details, visuals and chat build their prompt
+   * prefix from it, so the prefix stays byte-identical to the summary's (Gemini's implicit cache,
+   * design §5.2). Missing in records saved before it was added.
+   */
+  meta?: VideoMeta;
   transcript: Transcript;
   summary?: Summary;
   details: Record<string, PointDetails>;

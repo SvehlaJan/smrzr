@@ -12,7 +12,7 @@ import { browser } from 'wxt/browser';
 import { defineContentScript } from 'wxt/utils/define-content-script';
 import { sendToExtension } from '../src/messaging';
 import { createBridgeClient } from '../src/transcript/bridge';
-import { createTabMessageHandler, createVideoChangeNotifier, isPanelToTab } from '../src/transcript/isolated';
+import { createTabMessageHandler, createVideoChangeNotifier, failureResponse, isPanelToTab } from '../src/transcript/isolated';
 import { createSafeLogger } from '../src/transcript/logging';
 
 export default defineContentScript({
@@ -35,9 +35,11 @@ export default defineContentScript({
     // to keep the channel open. Messages that aren't ours return undefined so other listeners can answer.
     const onMessage = (msg: unknown, _sender: unknown, sendResponse: (response?: unknown) => void): true | undefined => {
       if (!isPanelToTab(msg)) return undefined;
+      // `handle` never rejects; the second callback is a backstop so the panel always gets a
+      // well-formed answer (never `undefined`).
       handle(msg).then(sendResponse, (err: unknown) => {
         log.error(err, { where: 'content.onMessage', type: msg.type });
-        sendResponse(undefined);
+        sendResponse(failureResponse(msg, err));
       });
       return true;
     };

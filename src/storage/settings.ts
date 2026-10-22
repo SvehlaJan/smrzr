@@ -15,8 +15,15 @@ export const DEFAULT_SETTINGS: Settings = {
 /** The single storage.local key that holds the whole Settings object. */
 export const SETTINGS_KEY = 'settings';
 
-/** What may actually be in storage: older versions may have stored fewer fields. */
-type StoredSettings = Partial<Omit<Settings, 'models'>> & { models?: Partial<Record<LlmTask, string>> };
+/**
+ * A partial Settings object where `models` may also name only some tasks. Used for what may be
+ * in storage (older versions may have stored fewer fields) and for saveSettings patches.
+ */
+export type SettingsPatch = Partial<Omit<Settings, 'models'>> & { models?: Partial<Record<LlmTask, string>> };
+type StoredSettings = SettingsPatch;
+
+/** Where the API key in use comes from: typed into Settings, the dev-only .env fallback, or nowhere. */
+export type ApiKeySource = 'stored' | 'dev_env' | 'none';
 
 /** In development builds, an empty apiKey falls back to import.meta.env.WXT_GEMINI_API_KEY. */
 export async function getSettings(): Promise<Settings> {
@@ -24,10 +31,21 @@ export async function getSettings(): Promise<Settings> {
 }
 
 /**
+ * The settings exactly as stored (over the defaults), WITHOUT the dev key fallback, plus where the
+ * key in use comes from. For the Settings form: it must show (and so save) only what the user
+ * entered, never the development key.
+ */
+export async function getStoredSettings(): Promise<{ settings: Settings; apiKeySource: ApiKeySource }> {
+  const settings = mergeSettings(DEFAULT_SETTINGS, await readStored());
+  const apiKeySource: ApiKeySource = settings.apiKey ? 'stored' : devApiKey() ? 'dev_env' : 'none';
+  return { settings, apiKeySource };
+}
+
+/**
  * Merges `patch` over the stored settings (models are merged per task), saves and returns the result.
  * The dev-only fallback key is never written to storage.
  */
-export async function saveSettings(patch: Partial<Settings>): Promise<Settings> {
+export async function saveSettings(patch: SettingsPatch): Promise<Settings> {
   const next = mergeSettings(mergeSettings(DEFAULT_SETTINGS, await readStored()), patch);
   await browser.storage.local.set({ [SETTINGS_KEY]: next });
   return withDevFallback(next);

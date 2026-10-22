@@ -23,7 +23,9 @@ export default defineBackground(() => {
 
   // Telemetry starts disabled until settings are read (the read is async), then follows the
   // "Send errors to Sentry" setting live.
-  getSettings()
+  // `ready` resolves once that first read + initTelemetry is done. It never rejects: if settings
+  // can't be read, Sentry stays off and events are still logged locally.
+  const ready: Promise<void> = getSettings()
     .then((s) => initTelemetry({ component: 'background', enabled: s.sentryEnabled }))
     .catch((err: unknown) => {
       initTelemetry({ component: 'background', enabled: false });
@@ -33,7 +35,10 @@ export default defineBackground(() => {
 
   browser.runtime.onMessage.addListener((msg: unknown) => {
     if (isTabToExtension(msg) && msg.type === 'log') {
-      void handleForwardedLog(msg.event);
+      // Often the forwarded error is what woke this worker up, before Sentry was initialised:
+      // wait for `ready`, or the error would never reach Sentry. Order of events is kept.
+      const event = msg.event;
+      void ready.then(() => handleForwardedLog(event));
     }
     // Returning undefined (not `true`, not a Promise) tells Chrome we won't respond, so other
     // listeners — e.g. the side panel listening for `videoChanged` — can.

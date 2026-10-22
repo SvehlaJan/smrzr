@@ -2,9 +2,11 @@
 //   llm.request  → before the call (metadata only)
 //   llm.response → after the call (timing, tokens, cost)
 //   recordExchange → the full prompt + response, kept locally for manual issue reports only
-//   logger.error → on failure, before rethrowing
+//   llm.failed   → on failure (warn, metadata only), before rethrowing; nothing for aborts
+// The error itself is NOT logged here: the UI's handleError owns `logger.error` for pipeline
+// failures (it knows the task and video), so each failure is reported exactly once.
 // Prompts and transcript text are NEVER put into `event` data (that goes to Sentry breadcrumbs).
-import type { GenerateRequest, GenerateResult, LlmMessage } from '../llm/client';
+import { LlmError, type GenerateRequest, type GenerateResult, type LlmMessage } from '../llm/client';
 import type { LlmTask, LlmUsage } from '../types';
 import type { PipelineContext } from './index';
 import { PROMPT_VERSION } from './prompts';
@@ -26,9 +28,16 @@ function messagesForExchange(messages: LlmMessage[]): unknown {
   }));
 }
 
+/** User pressed Stop / the video changed: not a failure, so nothing is logged for it. */
+function isAbort(err: unknown): boolean {
+  if (err instanceof LlmError) return err.kind === 'aborted';
+  return (err as { name?: unknown } | null)?.name === 'AbortError';
+}
+
 /**
  * Calls the LLM with full telemetry. Uses `stream` when `onDelta` is given, `generate` otherwise.
  * `req.model` and `req.signal` are filled in from the arguments / context.
+ * `attempt` (1-based) is only passed by generateStructured, for the `llm.failed` event.
  */
 export async function callLlm(
   ctx: PipelineContext,
@@ -36,6 +45,7 @@ export async function callLlm(
   model: string,
   req: Omit<GenerateRequest, 'model' | 'signal'>,
   onDelta?: (textSoFar: string) => void,
+  attempt?: number,
 ): Promise<GenerateResult> {
   const { logger } = ctx;
   const videoId = ctx.meta.videoId;
@@ -52,7 +62,19 @@ export async function callLlm(
   try {
     result = onDelta ? await ctx.client.stream(fullReq, onDelta) : await ctx.client.generate(fullReq);
   } catch (err) {
-    logger.error(err, { task, model, videoId });
+    if (!isAbort(err)) {
+      logger.event(
+        'llm.failed',
+        {
+          task,
+          model,
+          kind: err instanceof LlmError ? err.kind : 'other',
+          status: err instanceof LlmError ? (err.status ?? null) : null,
+          ...(attempt !== undefined ? { attempt } : {}),
+        },
+        { level: 'warn', videoId },
+      );
+    }
     throw err;
   }
 
@@ -95,7 +117,8 @@ export class InvalidOutputError extends Error {
 
 /**
  * Structured-output call: generate → JSON.parse → `validate`. If parsing or validation fails, logs
- * `llm.invalid_output` and tries ONCE more; a second failure throws InvalidOutputError.
+ * `llm.invalid_output` and tries ONCE more; a second failure logs `llm.failed` and throws
+ * InvalidOutputError.
  * `validate` returns the typed value or throws an Error describing what is wrong.
  * The returned usage covers all attempts (both calls were paid for).
  */
@@ -111,7 +134,7 @@ export async function generateStructured<T>(
   let lastProblem = '';
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const result = await callLlm(ctx, task, model, req);
+    const result = await callLlm(ctx, task, model, req, undefined, attempt);
     usage = usage ? addUsage(usage, result.usage) : result.usage;
     try {
       const value = validate(parseJsonText(result.text));
@@ -126,9 +149,13 @@ export async function generateStructured<T>(
     }
   }
 
-  const error = new InvalidOutputError(`The model returned unusable ${task} output twice (${lastProblem})`);
-  ctx.logger.error(error, { task, model, videoId: ctx.meta.videoId });
-  throw error;
+  // Metadata only; the UI logs the thrown error itself (see the header comment).
+  ctx.logger.event(
+    'llm.failed',
+    { task, model, kind: 'invalid_output', status: null, attempt: MAX_ATTEMPTS },
+    { level: 'warn', videoId: ctx.meta.videoId },
+  );
+  throw new InvalidOutputError(`The model returned unusable ${task} output twice (${lastProblem})`);
 }
 
 /** JSON.parse that tolerates a ```json … ``` fence around the JSON (should not happen with a response schema). */

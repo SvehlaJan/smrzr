@@ -106,21 +106,33 @@ describe('summarize', () => {
     expect(invalid[0]!.data).toMatchObject({ task: 'summary', retry: 0 });
   });
 
-  it('throws after the second invalid output (schema mismatch) and logs the error', async () => {
+  it('throws after the second invalid output (schema mismatch) with a metadata-only llm.failed event', async () => {
     const client = fakeClient(JSON.stringify({ tldr: 'x', points: [] }), JSON.stringify({ points: [{ title: 'a' }] }));
     const ctx = makeCtx(client);
     await expect(summarize(ctx, 'gemini-3-flash')).rejects.toBeInstanceOf(InvalidOutputError);
     expect(client.requests).toHaveLength(2);
     expect(ctx.logger.events.filter((e) => e.name === 'llm.invalid_output')).toHaveLength(2);
-    expect(ctx.logger.errors).toHaveLength(1);
-    expect(ctx.logger.errors[0]!.context).toMatchObject({ task: 'summary' });
+    // The UI logs the thrown error; the pipeline must not log it a second time.
+    expect(ctx.logger.errors).toHaveLength(0);
+    const failed = ctx.logger.events.filter((e) => e.name === 'llm.failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]!.data).toEqual({ task: 'summary', model: 'gemini-3-flash', kind: 'invalid_output', status: null, attempt: 2 });
+    expect(failed[0]!.opts).toMatchObject({ level: 'warn' });
   });
 
-  it('logs and rethrows client errors', async () => {
+  it('emits llm.failed (warn, metadata only) for client errors and rethrows without logger.error', async () => {
     const ctx = makeCtx(fakeClient(new LlmError('Quota exceeded', 'quota', 429)));
     await expect(summarize(ctx, 'm')).rejects.toMatchObject({ kind: 'quota' });
-    expect(ctx.logger.errors).toHaveLength(1);
-    expect(ctx.logger.errors[0]!.context).toMatchObject({ task: 'summary' });
+    expect(ctx.logger.errors).toHaveLength(0);
+    expect(ctx.logger.events.map((e) => e.name)).toEqual(['llm.request', 'llm.failed']);
+    expect(ctx.logger.events[1]!.data).toEqual({ task: 'summary', model: 'm', kind: 'quota', status: 429, attempt: 1 });
+    expect(ctx.logger.events[1]!.opts).toMatchObject({ level: 'warn' });
+  });
+
+  it('logs nothing for aborted calls (Stop / video change)', async () => {
+    const ctx = makeCtx(fakeClient(new LlmError('Request aborted', 'aborted')));
+    await expect(summarize(ctx, 'm')).rejects.toMatchObject({ kind: 'aborted' });
+    expect(ctx.logger.errors).toHaveLength(0);
     expect(ctx.logger.events.map((e) => e.name)).toEqual(['llm.request']);
   });
 

@@ -86,6 +86,9 @@ export function VideoView({ session, settings, onOpenSettings, onOpenHistory }: 
             <span className="spinner" aria-hidden="true" />
             {status.step === 'transcript' ? 'Fetching transcript…' : 'Summarizing…'}
           </p>
+          <button type="button" className="btn" onClick={session.cancelSummarize}>
+            Cancel
+          </button>
         </>
       );
 

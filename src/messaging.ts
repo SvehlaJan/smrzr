@@ -4,6 +4,7 @@
 //   youtube tab ──runtime.sendMessage──▶ background (logs) / side panel (videoChanged)
 //
 // The isolated ⇄ MAIN bridge is internal to src/transcript (see bridge.ts there).
+// Responses from the tab are checked with messageGuards.ts before use (a page can forge them).
 //
 // Receiving side: `wxt/browser` is plain `chrome` (not webextension-polyfill), so an onMessage
 // listener must answer with `sendResponse(...)` and `return true` to respond asynchronously.

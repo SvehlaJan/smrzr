@@ -50,7 +50,12 @@ export const geminiMock = { createGeminiClient: vi.fn(() => fakeClient) };
 
 export const modelsMock = { pickDefaultModels: vi.fn(), selectableModels: vi.fn() };
 
-export const settingsMock = { getSettings: vi.fn(), saveSettings: vi.fn(), watchSettings: vi.fn(() => () => {}) };
+export const settingsMock = {
+  getSettings: vi.fn(),
+  getStoredSettings: vi.fn(),
+  saveSettings: vi.fn(),
+  watchSettings: vi.fn(() => () => {}),
+};
 
 /** In-memory stand-in for the Dexie history (src/storage/db.ts). */
 export const memoryDb = new Map<string, VideoRecord>();
@@ -61,6 +66,13 @@ export const dbMock = {
     const current = memoryDb.get(id);
     if (!current) throw new Error(`no record ${id}`);
     const next = { ...current, ...structuredClone(patch) };
+    memoryDb.set(id, next);
+    return structuredClone(next);
+  }),
+  updateVideoWith: vi.fn(async (id: string, makePatch: (latest: VideoRecord) => Partial<VideoRecord>) => {
+    const current = memoryDb.get(id);
+    if (!current) throw new Error(`no record ${id}`);
+    const next = { ...current, ...structuredClone(makePatch(structuredClone(current))) };
     memoryDb.set(id, next);
     return structuredClone(next);
   }),

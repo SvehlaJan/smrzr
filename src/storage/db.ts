@@ -45,17 +45,27 @@ export async function putVideo(record: VideoRecord): Promise<void> {
   await db.videos.put(record);
 }
 
+export type VideoPatch = Partial<Omit<VideoRecord, 'videoId'>>;
+
 /** Shallow-merges patch into an existing record. Throws if the record doesn't exist. */
-export async function updateVideo(
-  videoId: string,
-  patch: Partial<Omit<VideoRecord, 'videoId'>>,
-): Promise<VideoRecord> {
-  // A read-modify-write inside one transaction, so two concurrent updates (e.g. a chat
-  // message and a details expansion finishing at the same time) can't overwrite each other.
+export async function updateVideo(videoId: string, patch: VideoPatch): Promise<VideoRecord> {
+  return updateVideoWith(videoId, () => patch);
+}
+
+/**
+ * Like updateVideo, but the patch is computed from the freshest stored record *inside* the
+ * transaction. Use it when the patch depends on current values (append to chat, add to cost):
+ * two updates finishing at the same time (e.g. a chat reply and a details expansion) then
+ * each build on the other's result instead of overwriting it. `makePatch` must be synchronous
+ * (no awaits inside a Dexie transaction other than on the transaction's own tables).
+ * Throws if the record doesn't exist.
+ */
+export async function updateVideoWith(videoId: string, makePatch: (latest: VideoRecord) => VideoPatch): Promise<VideoRecord> {
+  // A read-modify-write inside one transaction, so concurrent updates can't interleave.
   return db.transaction('rw', db.videos, async () => {
     const existing = await db.videos.get(videoId);
     if (!existing) throw new Error(`updateVideo: no record for videoId "${videoId}"`);
-    const merged: VideoRecord = { ...existing, ...patch, videoId };
+    const merged: VideoRecord = { ...existing, ...makePatch(existing), videoId };
     await db.videos.put(merged);
     return merged;
   });

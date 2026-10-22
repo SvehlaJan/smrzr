@@ -6,6 +6,9 @@
 //   POST /models/{model}:streamGenerateContent?alt=sse
 //   GET  /models?pageSize=…&pageToken=…
 //
+// Timeouts: non-streaming calls have a deadline (generate 180 s, listModels 20 s); a stream fails
+// when nothing arrives for 90 s. Either becomes LlmError 'network' ("timed out"), never 'aborted'.
+//
 // ASSUMPTIONS written from knowledge of the API, not verified against live docs in this sandbox.
 // Each one is marked "ASSUMPTION" below; check them with a real key first (M0).
 import type { LlmUsage } from '../types';
@@ -22,7 +25,17 @@ export interface GeminiClientOptions {
   fetchImpl?: typeof fetch;
   /** Delay before the single automatic retry (5xx / network errors, non-streaming only). */
   retryDelayMs?: number;
+  /** Deadline for a whole non-streaming generate call, retry included. Default 180 s. */
+  generateTimeoutMs?: number;
+  /** Deadline for listing models (all pages). Default 20 s. */
+  listModelsTimeoutMs?: number;
+  /** A stream fails when no chunk arrives for this long (the first one included). Default 90 s. */
+  streamIdleTimeoutMs?: number;
 }
+
+const DEFAULT_GENERATE_TIMEOUT_MS = 180_000;
+const DEFAULT_LIST_MODELS_TIMEOUT_MS = 20_000;
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
 
 // ---------- Gemini wire types (only the fields we use) ----------
 
@@ -84,6 +97,9 @@ export function createGeminiClient(apiKey: string, opts?: GeminiClientOptions): 
   // Bind so `fetch` keeps its `this` (calling an unbound window.fetch throws "Illegal invocation").
   const fetchImpl = opts?.fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
   const retryDelayMs = opts?.retryDelayMs ?? 1000;
+  const generateTimeoutMs = opts?.generateTimeoutMs ?? DEFAULT_GENERATE_TIMEOUT_MS;
+  const listModelsTimeoutMs = opts?.listModelsTimeoutMs ?? DEFAULT_LIST_MODELS_TIMEOUT_MS;
+  const streamIdleTimeoutMs = opts?.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS;
 
   /** Removes the API key (and anything that looks like one) from a string we might show or log. */
   const redact = (s: string): string => {
@@ -127,15 +143,47 @@ export function createGeminiClient(apiKey: string, opts?: GeminiClientOptions): 
     return `${baseUrl}/models/${id}:${method}`;
   }
 
+  /** All models usable with generateContent, following nextPageToken. */
+  async function listAllModels(signal: AbortSignal): Promise<ModelInfo[]> {
+    const models: ModelInfo[] = [];
+    let pageToken: string | undefined;
+    // Hard cap on pages so a misbehaving API can't loop us forever.
+    for (let page = 0; page < 20; page++) {
+      const params = new URLSearchParams({ pageSize: '1000' });
+      if (pageToken) params.set('pageToken', pageToken);
+      const url = `${baseUrl}/models?${params.toString()}`;
+      const json = await withRetry(async () => {
+        const response = await send(url, { method: 'GET' }, signal);
+        return (await readJson(response, signal, redact)) as { models?: GeminiModel[]; nextPageToken?: string };
+      }, signal);
+
+      for (const m of json.models ?? []) {
+        if (!m.name || !(m.supportedGenerationMethods ?? []).includes('generateContent')) continue;
+        const id = m.name.replace(/^models\//, '');
+        models.push({
+          id,
+          displayName: m.displayName ?? id,
+          inputTokenLimit: m.inputTokenLimit ?? 0,
+          outputTokenLimit: m.outputTokenLimit ?? 0,
+        });
+      }
+      pageToken = json.nextPageToken || undefined;
+      if (!pageToken) break;
+    }
+    return models;
+  }
+
   return {
     async generate(req) {
       const url = modelUrl(req.model, 'generateContent');
       const body = JSON.stringify(buildRequestBody(req));
       const started = Date.now();
-      const json = await withRetry(async () => {
-        const response = await send(url, { method: 'POST', body }, req.signal);
-        return (await readJson(response, req.signal, redact)) as GeminiResponse;
-      }, req.signal);
+      const json = await withDeadline(req.signal, generateTimeoutMs, 'Gemini request', (signal) =>
+        withRetry(async () => {
+          const response = await send(url, { method: 'POST', body }, signal);
+          return (await readJson(response, signal, redact)) as GeminiResponse;
+        }, signal),
+      );
       return toResult(req.model, [json], Date.now() - started);
     },
 
@@ -143,11 +191,25 @@ export function createGeminiClient(apiKey: string, opts?: GeminiClientOptions): 
       const url = modelUrl(req.model, 'streamGenerateContent') + '?alt=sse';
       const body = JSON.stringify(buildRequestBody(req));
       const started = Date.now();
-      const response = await send(url, { method: 'POST', body }, req.signal);
+
+      // Idle timeout: a stream may legitimately run for minutes, but not sit silent. The timer
+      // restarts on every chunk; when it fires, `idle` aborts the request like a Stop would.
+      const idle = new AbortController();
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      const restartIdleTimer = () => {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => idle.abort(), streamIdleTimeoutMs);
+      };
+      const signal = req.signal ? AbortSignal.any([req.signal, idle.signal]) : idle.signal;
+      /** Our idle timer fired (not the caller's Stop): a 'network' error, which the UI shows. */
+      const idleError = () =>
+        new LlmError(`Gemini stopped sending data (nothing for ${formatSeconds(streamIdleTimeoutMs)}, timed out)`, 'network');
 
       const chunks: GeminiResponse[] = [];
       let textSoFar = '';
+      restartIdleTimer();
       try {
+        const response = await send(url, { method: 'POST', body }, signal);
         if (!response.body) {
           // No streaming body (should not happen in Chrome): treat the whole text as SSE at once.
           const whole = await response.text();
@@ -158,6 +220,7 @@ export function createGeminiClient(apiKey: string, opts?: GeminiClientOptions): 
           if (textSoFar) onDelta(textSoFar);
         } else {
           for await (const payload of readSseData(response.body)) {
+            restartIdleTimer();
             const chunk = parseChunk(payload, redact);
             chunks.push(chunk);
             const delta = answerText(chunk);
@@ -168,40 +231,45 @@ export function createGeminiClient(apiKey: string, opts?: GeminiClientOptions): 
           }
         }
       } catch (err) {
-        throw toTransportError(err, req.signal, redact);
+        if (idle.signal.aborted && !req.signal?.aborted) throw idleError();
+        throw toTransportError(err, signal, redact);
+      } finally {
+        clearTimeout(idleTimer);
       }
       return toResult(req.model, chunks, Date.now() - started);
     },
 
-    async listModels(signal) {
-      const models: ModelInfo[] = [];
-      let pageToken: string | undefined;
-      // Hard cap on pages so a misbehaving API can't loop us forever.
-      for (let page = 0; page < 20; page++) {
-        const params = new URLSearchParams({ pageSize: '1000' });
-        if (pageToken) params.set('pageToken', pageToken);
-        const url = `${baseUrl}/models?${params.toString()}`;
-        const json = await withRetry(async () => {
-          const response = await send(url, { method: 'GET' }, signal);
-          return (await readJson(response, signal, redact)) as { models?: GeminiModel[]; nextPageToken?: string };
-        }, signal);
-
-        for (const m of json.models ?? []) {
-          if (!m.name || !(m.supportedGenerationMethods ?? []).includes('generateContent')) continue;
-          const id = m.name.replace(/^models\//, '');
-          models.push({
-            id,
-            displayName: m.displayName ?? id,
-            inputTokenLimit: m.inputTokenLimit ?? 0,
-            outputTokenLimit: m.outputTokenLimit ?? 0,
-          });
-        }
-        pageToken = json.nextPageToken || undefined;
-        if (!pageToken) break;
-      }
-      return models;
+    async listModels(callerSignal) {
+      return withDeadline(callerSignal, listModelsTimeoutMs, 'Loading the model list', (signal) => listAllModels(signal));
     },
   };
+}
+
+/**
+ * Runs `fn` with the caller's signal combined with a deadline. When the deadline (not the
+ * caller) aborted it, the result is a 'network' LlmError saying "timed out" — NOT 'aborted',
+ * which the UI treats as "the user pressed Stop" and hides.
+ */
+async function withDeadline<T>(
+  callerSignal: AbortSignal | undefined,
+  ms: number,
+  what: string,
+  fn: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const deadline = AbortSignal.timeout(ms);
+  const signal = callerSignal ? AbortSignal.any([callerSignal, deadline]) : deadline;
+  try {
+    return await fn(signal);
+  } catch (err) {
+    if (deadline.aborted && !callerSignal?.aborted) {
+      throw new LlmError(`${what} timed out after ${formatSeconds(ms)}`, 'network');
+    }
+    throw err;
+  }
+}
+
+function formatSeconds(ms: number): string {
+  return ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`;
 }
 
 // ---------- request mapping ----------

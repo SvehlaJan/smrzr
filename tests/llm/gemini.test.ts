@@ -371,6 +371,86 @@ describe('abort', () => {
   });
 });
 
+describe('timeouts', () => {
+  /** A fetch that never answers, but rejects like Chrome's fetch when its signal aborts. */
+  const hangingFetch = () =>
+    vi.fn(
+      (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+        }),
+    );
+
+  /** A streaming response that sends `chunks` (one every `everyMs`), then stays silent; errors on abort. */
+  const trickleFetch = (chunks: string[], everyMs: number) =>
+    vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => {
+      const encoder = new TextEncoder();
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          chunks.forEach((text, i) =>
+            setTimeout(() => c.enqueue(encoder.encode(sse({ candidates: [{ content: { parts: [{ text }] } }] }))), i * everyMs),
+          );
+          init?.signal?.addEventListener('abort', () => c.error(new DOMException('aborted', 'AbortError')));
+        },
+      });
+      return { ok: true, status: 200, body } as unknown as Response;
+    });
+
+  it('generate: a request with no answer times out as a network error (not aborted), without retry', async () => {
+    const fetchMock = hangingFetch();
+    const c = createGeminiClient(KEY, { fetchImpl: fetchMock as unknown as typeof fetch, retryDelayMs: 1, generateTimeoutMs: 30 });
+    const err = await failure(c.generate(simpleReq));
+    expect(err.kind).toBe('network');
+    expect(err.message).toMatch(/timed out/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('generate: the caller aborting before the deadline is still "aborted"', async () => {
+    const controller = new AbortController();
+    const c = createGeminiClient(KEY, { fetchImpl: hangingFetch() as unknown as typeof fetch, generateTimeoutMs: 10_000 });
+    const promise = c.generate({ ...simpleReq, signal: controller.signal });
+    controller.abort();
+    expect((await failure(promise)).kind).toBe('aborted');
+  });
+
+  it('listModels times out as a network error', async () => {
+    const c = createGeminiClient(KEY, { fetchImpl: hangingFetch() as unknown as typeof fetch, listModelsTimeoutMs: 30 });
+    const err = await failure(c.listModels());
+    expect(err.kind).toBe('network');
+    expect(err.message).toMatch(/timed out/);
+  });
+
+  it('stream: fails as a network "timed out" error when no chunk arrives for the idle timeout', async () => {
+    const deltas: string[] = [];
+    const c = createGeminiClient(KEY, { fetchImpl: trickleFetch(['a'], 0), streamIdleTimeoutMs: 40 });
+    const err = await failure(c.stream(simpleReq, (t) => deltas.push(t)));
+    expect(err.kind).toBe('network');
+    expect(err.message).toMatch(/timed out/);
+    expect(deltas).toEqual(['a']);
+  });
+
+  it('stream: the idle timer restarts on every chunk, so a slow but steady stream completes', async () => {
+    // 5 chunks 25 ms apart = ~100 ms total, longer than the 60 ms idle timeout; then the stream ends.
+    const encoder = new TextEncoder();
+    const fetchMock = vi.fn(async () => {
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          for (let i = 0; i < 5; i++) {
+            setTimeout(() => {
+              c.enqueue(encoder.encode(sse({ candidates: [{ content: { parts: [{ text: String(i) }] } }] })));
+              if (i === 4) c.close();
+            }, i * 25);
+          }
+        },
+      });
+      return { ok: true, status: 200, body } as unknown as Response;
+    });
+    const c = createGeminiClient(KEY, { fetchImpl: fetchMock as unknown as typeof fetch, streamIdleTimeoutMs: 60 });
+    const res = await c.stream(simpleReq, () => {});
+    expect(res.text).toBe('01234');
+  });
+});
+
 describe('listModels', () => {
   it('follows nextPageToken and keeps generateContent models', async () => {
     const fetchMock = fetchSequence(

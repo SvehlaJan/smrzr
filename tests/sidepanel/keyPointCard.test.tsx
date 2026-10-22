@@ -144,6 +144,6 @@ describe('KeyPointCard + session (lazy details)', () => {
     expect(await screen.findByText('chart')).toBeTruthy();
     expect(pipelineMock.analyzeVisuals.mock.calls[0]?.[2]).toMatchObject({ id: 'p1' });
     expect(memoryDb.get(VIDEO_ID)?.details.p1?.visuals).toBe('A **chart** of reaction times.');
-    expect(dbMock.updateVideo).toHaveBeenCalled();
+    expect(dbMock.updateVideoWith).toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { db, deleteVideo, getVideo, listHistory, putVideo, updateVideo } from '../../src/storage/db';
+import { db, deleteVideo, getVideo, listHistory, putVideo, updateVideo, updateVideoWith } from '../../src/storage/db';
 import type { VideoRecord } from '../../src/types';
 
 function makeVideo(videoId: string, overrides: Partial<VideoRecord> = {}): VideoRecord {
@@ -80,6 +80,32 @@ describe('updateVideo', () => {
     const updated = await updateVideo('abc', { videoId: 'other' } as Partial<VideoRecord>);
     expect(updated.videoId).toBe('abc');
     expect(await getVideo('other')).toBeUndefined();
+  });
+});
+
+describe('updateVideoWith', () => {
+  it('builds each patch from the latest record, so concurrent updates do not lose each other', async () => {
+    await putVideo(makeVideo('abc', { totalCostUsd: 1 }));
+    // Both start before either finishes; each patch reads the record inside its own transaction.
+    const [a, b] = await Promise.all([
+      updateVideoWith('abc', (latest) => ({
+        details: { ...latest.details, p1: { subpoints: [], context: 'x' } },
+        totalCostUsd: latest.totalCostUsd + 0.5,
+      })),
+      updateVideoWith('abc', (latest) => ({
+        details: { ...latest.details, p2: { subpoints: [], context: 'y' } },
+        totalCostUsd: latest.totalCostUsd + 0.25,
+      })),
+    ]);
+    const stored = await getVideo('abc');
+    expect(Object.keys(stored!.details).sort()).toEqual(['p1', 'p2']);
+    expect(stored!.totalCostUsd).toBeCloseTo(1.75);
+    // The second one saw the first one's result.
+    expect([a.totalCostUsd, b.totalCostUsd].sort()).toEqual([1.5, 1.75]);
+  });
+
+  it('throws when the record does not exist', async () => {
+    await expect(updateVideoWith('missing', () => ({ title: 'x' }))).rejects.toThrow(/missing/);
   });
 });
 

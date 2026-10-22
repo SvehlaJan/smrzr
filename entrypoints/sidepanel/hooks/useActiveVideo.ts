@@ -5,7 +5,7 @@
 //   1. tabs.query on startup and whenever the active tab changes (tabs.onActivated)
 //   2. tabs.onUpdated when the active tab's URL changes (YouTube navigates without page loads)
 //   3. `videoChanged` messages from our content script (authoritative, sent after YouTube's
-//      own 'yt-navigate-finish' event)
+//      own 'yt-navigate-finish' event, and once when the content script starts)
 // We parse the URL ourselves too, so the panel works before (or without) the content script.
 
 import { useEffect, useRef, useState } from 'react';
@@ -18,9 +18,16 @@ export interface ActiveVideo {
   /** URL of the active tab (needs the "tabs" permission). */
   url: string | null;
   videoId: string | null;
+  /**
+   * Bumped on EVERY `videoChanged` message from the active tab, even when the video id didn't
+   * change. After a full page load the content script starts late (document_idle) and its first
+   * message repeats the id the panel already knows from the URL; this counter still tells the
+   * video session "the tab can answer now" (see useVideoSession).
+   */
+  tabSignals: number;
 }
 
-const NONE: ActiveVideo = { tabId: null, url: null, videoId: null };
+const NONE: ActiveVideo = { tabId: null, url: null, videoId: null, tabSignals: 0 };
 
 export function useActiveVideo(): ActiveVideo {
   const [active, setActive] = useState<ActiveVideo>(NONE);
@@ -35,7 +42,7 @@ export function useActiveVideo(): ActiveVideo {
       tabIdRef.current = tabId;
       const videoId = parseVideoId(url);
       setActive((prev) =>
-        prev.tabId === tabId && prev.url === url && prev.videoId === videoId ? prev : { tabId, url, videoId },
+        prev.tabId === tabId && prev.url === url && prev.videoId === videoId ? prev : { ...prev, tabId, url, videoId },
       );
     };
 
@@ -60,7 +67,7 @@ export function useActiveVideo(): ActiveVideo {
     const onMessage = (msg: unknown, sender: { tab?: { id?: number } }) => {
       if (!isTabToExtension(msg) || msg.type !== 'videoChanged') return;
       if (sender.tab?.id === undefined || sender.tab.id !== tabIdRef.current) return;
-      setActive((prev) => (prev.videoId === msg.videoId ? prev : { ...prev, videoId: msg.videoId }));
+      setActive((prev) => ({ ...prev, videoId: msg.videoId, tabSignals: prev.tabSignals + 1 }));
     };
 
     browser.tabs.onActivated.addListener(onActivated);

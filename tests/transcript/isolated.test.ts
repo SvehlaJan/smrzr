@@ -18,10 +18,12 @@ vi.mock('../../src/telemetry/forwardingLogger', () => ({
   },
 }));
 
-import type { TranscriptResponse } from '../../src/messaging';
+import { isTranscriptResponse, isVideoContextResponse } from '../../src/messageGuards';
+import type { PanelToTab, TranscriptResponse } from '../../src/messaging';
 import type { BridgeClient } from '../../src/transcript/bridge';
 import { BridgeTimeoutError } from '../../src/transcript/bridge';
-import { createTabMessageHandler, createVideoChangeNotifier, isPanelToTab } from '../../src/transcript/isolated';
+import { createTabMessageHandler, createVideoChangeNotifier, failureResponse, isPanelToTab } from '../../src/transcript/isolated';
+import type { VideoMeta } from '../../src/types';
 import { createSafeLogger, logTranscriptResult } from '../../src/transcript/logging';
 
 afterEach(() => {
@@ -108,6 +110,63 @@ describe('tab message handler', () => {
     document.body.append(video);
     await expect(handle({ type: 'seek', sec: 42 })).resolves.toEqual({ ok: true });
     expect(video.currentTime).toBe(42);
+  });
+});
+
+describe('malformed bridge answers (a page script can forge them)', () => {
+  const log = createSafeLogger('content');
+  const WATCH = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+
+  it.each([undefined, null, 'x', { ok: true }, { ok: true, meta: { videoId: 'v' } }, { ok: false, error: 'pwned' }])(
+    'getVideoContext answers a well-formed error for %j',
+    async (forged) => {
+      const handle = createTabMessageHandler({ bridge: fakeBridge(async () => forged as never), doc: document, href: () => WATCH, log });
+      const res = await handle({ type: 'getVideoContext' });
+      expect(res).toMatchObject({ ok: false, error: 'error' });
+      expect(isVideoContextResponse(res)).toBe(true);
+    },
+  );
+
+  it.each([undefined, {}, { ok: true, attempts: [] }, { ok: true, attempts: [], transcript: { segments: 'no' } }, { ok: false, error: 'x', attempts: [] }])(
+    'getTranscript answers all_strategies_failed for %j',
+    async (forged) => {
+      const handle = createTabMessageHandler({ bridge: fakeBridge(async () => forged as never), doc: document, href: () => '', log });
+      const res = await handle({ type: 'getTranscript', videoId: 'vid' });
+      expect(res).toMatchObject({ ok: false, error: 'all_strategies_failed', attempts: [{ outcome: 'error' }] });
+      expect(isTranscriptResponse(res)).toBe(true);
+    },
+  );
+
+  it('never rejects: an unexpected throw becomes a well-formed failure', async () => {
+    const doc = { querySelector: () => { throw new Error('boom'); } } as unknown as Document;
+    const handle = createTabMessageHandler({ bridge: fakeBridge(vi.fn()), doc, href: () => '', log });
+    await expect(handle({ type: 'seek', sec: 1 })).resolves.toEqual({ ok: false });
+  });
+
+  it('failureResponse is well-formed for every request type', () => {
+    const err = new Error('boom');
+    const ctx = failureResponse({ type: 'getVideoContext' }, err);
+    expect(isVideoContextResponse(ctx)).toBe(true);
+    const tr = failureResponse({ type: 'getTranscript', videoId: 'v' }, err);
+    expect(isTranscriptResponse(tr)).toBe(true);
+    expect(tr).toMatchObject({ attempts: [{ detail: 'Error: boom' }] });
+    expect(failureResponse({ type: 'seek', sec: 1 } satisfies PanelToTab, err)).toEqual({ ok: false });
+  });
+
+  it('accepts real responses', () => {
+    const meta: VideoMeta = {
+      videoId: 'v',
+      title: 't',
+      channel: 'c',
+      durationSec: 60,
+      chapters: [{ title: 'Intro', startSec: 0 }],
+      isLive: false,
+      captionTracks: [{ baseUrl: 'https://x', languageCode: 'en', kind: 'asr', name: 'English' }],
+    };
+    expect(isVideoContextResponse({ ok: true, meta })).toBe(true);
+    expect(isVideoContextResponse({ ok: false, error: 'player_not_ready', detail: 'x' })).toBe(true);
+    expect(isTranscriptResponse(OK)).toBe(true);
+    expect(isTranscriptResponse({ ok: false, error: 'no_captions', attempts: [] })).toBe(true);
   });
 });
 

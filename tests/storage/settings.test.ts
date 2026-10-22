@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
-import { DEFAULT_SETTINGS, getSettings, saveSettings, watchSettings } from '../../src/storage/settings';
+import { DEFAULT_SETTINGS, getSettings, getStoredSettings, saveSettings, watchSettings } from '../../src/storage/settings';
 
 beforeEach(() => {
   fakeBrowser.reset();
@@ -45,8 +45,8 @@ describe('saveSettings', () => {
 
   it('deep-merges models', async () => {
     await saveSettings({ models: { summary: 'flash', details: '', visuals: '', chat: '' } });
-    // A caller may pass only some tasks (e.g. from a partially loaded form).
-    const result = await saveSettings({ models: { chat: 'pro' } as never });
+    // A caller may pass only some tasks (e.g. from a partially loaded form) — no cast needed.
+    const result = await saveSettings({ models: { chat: 'pro' } });
     expect(result.models).toEqual({ summary: 'flash', details: '', visuals: '', chat: 'pro' });
   });
 
@@ -74,6 +74,18 @@ describe('dev API key fallback', () => {
     vi.stubEnv('WXT_GEMINI_API_KEY', 'dev-key');
     vi.stubEnv('DEV', false);
     expect((await getSettings()).apiKey).toBe('');
+  });
+
+  it('getStoredSettings shows only the stored key and says where the key in use comes from', async () => {
+    vi.stubEnv('WXT_GEMINI_API_KEY', 'dev-key');
+    expect(await getStoredSettings()).toEqual({ settings: DEFAULT_SETTINGS, apiKeySource: 'dev_env' });
+
+    await saveSettings({ apiKey: 'user-key' });
+    expect(await getStoredSettings()).toMatchObject({ settings: { apiKey: 'user-key' }, apiKeySource: 'stored' });
+
+    vi.stubEnv('WXT_GEMINI_API_KEY', '');
+    await saveSettings({ apiKey: '' });
+    expect(await getStoredSettings()).toMatchObject({ settings: { apiKey: '' }, apiKeySource: 'none' });
   });
 
   it('is never written to storage', async () => {

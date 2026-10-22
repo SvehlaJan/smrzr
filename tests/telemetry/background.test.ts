@@ -64,4 +64,56 @@ describe('background', () => {
     expect(forwarded).toMatchObject({ component: 'content', videoId: 'v1', data: { outcome: 'ok' } });
     expect(events.some((e) => e.name === 'videoChanged')).toBe(false);
   });
+
+  /** Makes the settings read slow, like a cold worker start. Returns a function that ends the delay. */
+  function delaySettingsRead(fail = false) {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const realGet = fakeBrowser.storage.local.get.bind(fakeBrowser.storage.local);
+    vi.spyOn(fakeBrowser.storage.local, 'get').mockImplementation((async (...args: Parameters<typeof realGet>) => {
+      await gate;
+      if (fail) throw new Error('storage unavailable');
+      return realGet(...args);
+    }) as typeof realGet);
+    return () => release();
+  }
+
+  const forwardedError = {
+    type: 'log',
+    event: { ts: 1, component: 'content', level: 'error', name: 'error', videoId: 'v9', data: { message: 'woke the worker' } },
+  };
+
+  it('reports a forwarded error to Sentry even when it arrives before settings were read', async () => {
+    const envelopes: [unknown, [{ type: string }, unknown][]][] = [];
+    setSentryTransportForTests(() => ({
+      send: async (envelope) => {
+        envelopes.push(envelope as unknown as (typeof envelopes)[number]);
+        return { statusCode: 200 };
+      },
+      flush: async () => true,
+    }));
+    const releaseSettings = delaySettingsRead();
+    await startBackground();
+
+    await fakeBrowser.runtime.sendMessage(forwardedError);
+    expect(isSentryEnabled()).toBe(false); // the race: telemetry isn't initialised yet
+    releaseSettings();
+
+    await vi.waitFor(() => expect(envelopes.flatMap((e) => e[1]).some(([header]) => header.type === 'event')).toBe(true));
+    await flushPendingWrites();
+    expect((await getRecentEvents()).some((e) => e.data?.message === 'woke the worker')).toBe(true);
+  });
+
+  it('still logs forwarded events locally when settings cannot be read', async () => {
+    const releaseSettings = delaySettingsRead(true);
+    await startBackground();
+    await fakeBrowser.runtime.sendMessage(forwardedError);
+    releaseSettings();
+
+    await vi.waitFor(async () => {
+      await flushPendingWrites();
+      expect((await getRecentEvents()).some((e) => e.data?.message === 'woke the worker')).toBe(true);
+    });
+    expect(isSentryEnabled()).toBe(false);
+  });
 });

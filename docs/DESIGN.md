@@ -240,6 +240,7 @@ Why split it like this: automatic error events stay small and private, while the
 | `llm.request` | task, model, promptVersion, est. input tokens, grounded? | "Which model/prompt produced this?" |
 | `llm.response` | ms, finishReason, input/output/cached tokens, search query count, est. cost | "Why was it slow / expensive / cut off?" |
 | `llm.invalid_output` | task, validation error, retry # | "Is the model breaking the JSON schema?" |
+| `llm.failed` | task, model, error kind, HTTP status, attempt (warn; none for user aborts — the UI logs the error itself) | "Which calls fail, and how?" |
 | `summary.validated` | point count, timestamps snapped / hidden | "Why does point 3 jump to the wrong place?" |
 | `ui.action` | summarize / expand / seek / chat / report, with ids | "What did you click before it broke?" |
 
