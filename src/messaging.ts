@@ -4,6 +4,10 @@
 //   youtube tab ──runtime.sendMessage──▶ background (logs) / side panel (videoChanged)
 //
 // The isolated ⇄ MAIN bridge is internal to src/transcript (see bridge.ts there).
+//
+// Receiving side: `wxt/browser` is plain `chrome` (not webextension-polyfill), so an onMessage
+// listener must answer with `sendResponse(...)` and `return true` to respond asynchronously.
+// Returning a Promise from the listener is NOT reliable in Chrome.
 
 import { browser } from 'wxt/browser';
 import type { LogEvent, Transcript, TranscriptAttempt, VideoMeta } from './types';

@@ -3,8 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // Telemetry is implemented by another module; mock it so these tests only check our calls.
 const events: { name: string; data?: Record<string, unknown>; opts?: unknown }[] = [];
 let createLoggerShouldThrow = false;
-vi.mock('../../src/telemetry', () => ({
-  createLogger: () => {
+vi.mock('../../src/telemetry/forwardingLogger', () => ({
+  createForwardingLogger: () => {
     if (createLoggerShouldThrow) throw new Error('Not implemented: createLogger');
     return {
       event: (name: string, data?: Record<string, unknown>, opts?: unknown) => {

@@ -2,7 +2,9 @@
 // Metadata only: strategy names, outcomes, counts, timings. Never transcript text.
 
 import type { TranscriptResponse } from '../messaging';
-import { createLogger } from '../telemetry';
+// Import the lightweight forwarding logger directly, not the telemetry barrel: the barrel pulls
+// Dexie and Sentry into the YouTube page bundle, and we never run those inside YouTube (design §8.3).
+import { createForwardingLogger } from '../telemetry/forwardingLogger';
 import type { Component, LogLevel } from '../types';
 import { countWords } from './text';
 
@@ -17,12 +19,12 @@ export interface SafeLogger {
  * break the content script. The real logger is created lazily on first use, and creation is
  * retried later if it failed.
  */
-export function createSafeLogger(component: Component): SafeLogger {
-  let logger: ReturnType<typeof createLogger> | null = null;
-  const get = (): ReturnType<typeof createLogger> | null => {
+export function createSafeLogger(component: Extract<Component, 'content' | 'main'>): SafeLogger {
+  let logger: ReturnType<typeof createForwardingLogger> | null = null;
+  const get = (): ReturnType<typeof createForwardingLogger> | null => {
     if (logger) return logger;
     try {
-      logger = createLogger(component);
+      logger = createForwardingLogger(component);
     } catch {
       logger = null;
     }
