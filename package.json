@@ -1,0 +1,35 @@
+{
+  "name": "smrzr",
+  "description": "AI summarizer for YouTube videos (Chrome side panel, Gemini BYOK)",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "compile": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "postinstall": "wxt prepare"
+  },
+  "dependencies": {
+    "@sentry/browser": "^11.8.0",
+    "dexie": "^4.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.2",
+    "@testing-library/react": "^16.3.3",
+    "@types/chrome": "^0.3.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@wxt-dev/module-react": "^1.2.2",
+    "fake-indexeddb": "^6.2.6",
+    "happy-dom": "^21.0.4",
+    "typescript": "~5.9",
+    "vitest": "^5.0.5",
+    "wxt": "^0.21.4"
+  }
+}
