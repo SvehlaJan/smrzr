@@ -102,7 +102,7 @@ Manifest V3. Four pieces, each with one job:
 
 ### Permissions (minimal)
 - `sidePanel`, `storage`, `unlimitedStorage` (history of 3h transcripts adds up)
-- `host_permissions`: `https://www.youtube.com/*`, `https://generativelanguage.googleapis.com/*`, the Sentry ingest host of your org's region (e.g. `https://*.ingest.sentry.io/*` or `https://*.ingest.de.sentry.io/*`)
+- `host_permissions`: `https://www.youtube.com/*`, `https://generativelanguage.googleapis.com/*`, `https://*.ingest.de.sentry.io/*` (Sentry EU region)
 
 ## 4. Transcript acquisition — the riskiest part
 
@@ -252,7 +252,8 @@ A free side effect: `llm.response` token counts multiplied by a small price tabl
 - **Readable stack traces without plumbing:** build **unminified**. Bundle size doesn't matter for a personal, unpacked extension, so there's no need for a source-map upload pipeline. Add `@sentry/vite-plugin` only if minification is ever turned on.
 - **Tags on every event:** `release = smrzr@<version>+<git sha>`, `environment` (development/production), `videoId`, `task`, `model`, `transcriptSource`, `promptVersion`.
 - **Tracing:** spans around transcript fetching and each LLM call, at 100% sampling. Personal volume is tiny, and it shows latency per model and strategy for free.
-- **Config:** `WXT_SENTRY_DSN` in `.env.local`, not committed. If the DSN is missing, Sentry is off, and the local log and "Copy debug bundle" still work.
+- **Project:** org `jans-gi` (EU region, `de.sentry.io`), project `smrzr`, team `jans`.
+- **Config:** `WXT_SENTRY_DSN` in `.env.local`, not committed (the DSN isn't a real secret since it ships inside the bundle, but keeping it out of git avoids spam events). If the DSN is missing, Sentry is off, and the local log and "Copy debug bundle" still work.
 
 ### 8.4 How debugging works in practice
 1. Point 4 jumps to the wrong minute → you click ⚑, write "point 4 timestamp is 10 min off", and send.
