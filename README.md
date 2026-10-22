@@ -13,7 +13,7 @@ Requirements: Node 22+, Chrome 116+.
 
 ```bash
 npm install
-cp .env.example .env.local   # fill in WXT_SENTRY_DSN (optional) and WXT_GEMINI_API_KEY (optional, dev only)
+# optional: WXT_SENTRY_DSN=... in .env.local, WXT_GEMINI_API_KEY=... in .env.development.local (see .env.example)
 npm run dev                  # builds to .output/chrome-mv3-dev and watches for changes
 ```
 
@@ -21,7 +21,7 @@ Load the extension in Chrome:
 1. Open `chrome://extensions` and enable **Developer mode**.
 2. Click **Load unpacked** and select `.output/chrome-mv3-dev` (or `.output/chrome-mv3` after `npm run build`).
 3. Pin smrzr, open a YouTube video, and click the toolbar icon. The side panel opens.
-4. Open **⚙ Settings**, paste your Gemini API key, click **Load models**, and save. In a dev build, `WXT_GEMINI_API_KEY` from `.env.local` is used automatically when the field is empty.
+4. Open **⚙ Settings**, paste your Gemini API key, click **Load models**, and save. In a dev build, `WXT_GEMINI_API_KEY` from `.env.development.local` is used automatically when the field is empty.
 
 Tabs that were already open before you installed or reloaded the extension need a page reload. Chrome only injects content scripts into pages loaded after that.
 
